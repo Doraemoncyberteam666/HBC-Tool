@@ -613,31 +613,85 @@ static PyObject* fu_memcpy(PyObject*, PyObject* args) {
     Py_ssize_t length;
     if (!PyArg_ParseTuple(args, "OOnn", &dest, &src, &start, &length)) return nullptr;
 
-    if (!PyList_Check(dest)) {
-        PyErr_SetString(PyExc_TypeError, "dest must be a list");
+    if (start < 0 || length < 0) {
+        PyErr_SetString(PyExc_IndexError, "memcpy: start/length must be non-negative");
         return nullptr;
     }
 
-    for (Py_ssize_t i = 0; i < length; ++i) {
-        PyObject* item = PySequence_GetItem(src, i);
-        if (!item) return nullptr;
-        long v = PyLong_AsLong(item);
-        if (PyErr_Occurred()) { Py_DECREF(item); return nullptr; }
-        if (v < 0 || v > 255) {
+    // Bytearray destination: contiguous mutable buffer, real memcpy path.
+    if (PyByteArray_Check(dest)) {
+        Py_ssize_t dest_len = PyByteArray_GET_SIZE(dest);
+        if (start + length > dest_len) {
+            PyErr_SetString(PyExc_IndexError, "memcpy: dest too small");
+            return nullptr;
+        }
+        char* dest_buf = PyByteArray_AS_STRING(dest);
+
+        // If src is also a contiguous byte buffer, do a real memcpy.
+        if (PyByteArray_Check(src) || PyBytes_Check(src)) {
+            const char* src_buf;
+            Py_ssize_t src_len;
+            if (PyByteArray_Check(src)) {
+                src_buf = PyByteArray_AS_STRING(src);
+                src_len = PyByteArray_GET_SIZE(src);
+            } else {
+                src_buf = PyBytes_AS_STRING(src);
+                src_len = PyBytes_GET_SIZE(src);
+            }
+            if (length > src_len) {
+                PyErr_SetString(PyExc_IndexError, "memcpy: src too small");
+                return nullptr;
+            }
+            memcpy(dest_buf + start, src_buf, (size_t)length);
+            Py_RETURN_NONE;
+        }
+
+        // Otherwise treat src as a sequence of ints in [0, 255].
+        for (Py_ssize_t i = 0; i < length; ++i) {
+            PyObject* item = PySequence_GetItem(src, i);
+            if (!item) return nullptr;
+            long v = PyLong_AsLong(item);
             Py_DECREF(item);
-            PyErr_SetString(PyExc_ValueError, "src item out of byte range");
-            return nullptr;
+            if (PyErr_Occurred()) return nullptr;
+            if (v < 0 || v > 255) {
+                PyErr_SetString(PyExc_ValueError, "src item out of byte range");
+                return nullptr;
+            }
+            dest_buf[start + i] = (char)v;
         }
-        PyObject* pyv = PyLong_FromLong(v);
-        Py_DECREF(item);
-        if (!pyv) return nullptr;
-        if (PyList_SetItem(dest, start + i, pyv) != 0) {
-            Py_DECREF(pyv);
-            return nullptr;
-        }
+        Py_RETURN_NONE;
     }
 
-    Py_RETURN_NONE;
+    // Legacy list[int] destination (kept so external callers keep working).
+    if (PyList_Check(dest)) {
+        Py_ssize_t dest_len = PyList_GET_SIZE(dest);
+        if (start + length > dest_len) {
+            PyErr_SetString(PyExc_IndexError, "memcpy: dest too small");
+            return nullptr;
+        }
+        for (Py_ssize_t i = 0; i < length; ++i) {
+            PyObject* item = PySequence_GetItem(src, i);
+            if (!item) return nullptr;
+            long v = PyLong_AsLong(item);
+            if (PyErr_Occurred()) { Py_DECREF(item); return nullptr; }
+            if (v < 0 || v > 255) {
+                Py_DECREF(item);
+                PyErr_SetString(PyExc_ValueError, "src item out of byte range");
+                return nullptr;
+            }
+            PyObject* pyv = PyLong_FromLong(v);
+            Py_DECREF(item);
+            if (!pyv) return nullptr;
+            if (PyList_SetItem(dest, start + i, pyv) != 0) {
+                Py_DECREF(pyv);
+                return nullptr;
+            }
+        }
+        Py_RETURN_NONE;
+    }
+
+    PyErr_SetString(PyExc_TypeError, "dest must be a list or bytearray");
+    return nullptr;
 }
 
 static PyMethodDef FastUtilMethods[] = {
