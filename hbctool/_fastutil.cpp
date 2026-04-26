@@ -111,7 +111,16 @@ static PyObject* parse_operand_value(const char* oper_t, PyObject* bc, Py_ssize_
     return PyLong_FromUnsignedLong((unsigned long)v);
 }
 
-static int append_operand_bytes(PyObject* out, const char* oper_t, PyObject* val_obj) {
+// Write the byte representation of a single operand directly into ``dst``.
+// Returns the number of bytes written, or -1 with a Python exception set.
+//
+// This used to be ``append_operand_bytes`` which built a Python ``list`` of
+// ``PyLong`` objects -- one allocation + one PyLong box per byte. For an
+// "instruction-heavy" bundle that's ~5 PyLong allocations per opcode times
+// ~1M opcodes = ~5M PyLong allocations per round-trip, all of which were
+// then unboxed back to bytes by the Python caller. Writing straight into
+// the output ``bytearray`` removes that entire round-trip.
+static int write_operand_bytes(uint8_t* dst, const char* oper_t, PyObject* val_obj) {
     int sz = operand_size(oper_t);
     if (sz < 0) {
         PyErr_SetString(PyExc_ValueError, "unknown operand type");
@@ -121,50 +130,65 @@ static int append_operand_bytes(PyObject* out, const char* oper_t, PyObject* val
     if (strcmp(oper_t, "Double") == 0) {
         double d = PyFloat_AsDouble(val_obj);
         if (PyErr_Occurred()) return -1;
-        uint8_t b[8];
-        memcpy(b, &d, 8);
-        for (int i = 0; i < 8; ++i) {
-            PyObject* v = PyLong_FromUnsignedLong((unsigned long)b[i]);
-            if (!v) return -1;
-            if (PyList_Append(out, v) != 0) {
-                Py_DECREF(v);
-                return -1;
-            }
-            Py_DECREF(v);
-        }
-        return 0;
+        memcpy(dst, &d, 8);
+        return 8;
     }
 
     long lv = PyLong_AsLong(val_obj);
     if (PyErr_Occurred()) return -1;
 
-    uint8_t b[4] = {0};
     if (strcmp(oper_t, "Addr8") == 0) {
-        b[0] = (uint8_t)((int8_t)lv);
-    } else if (strcmp(oper_t, "Addr32") == 0 || strcmp(oper_t, "Imm32") == 0) {
-        uint32_t u = (uint32_t)(int32_t)lv;
-        b[0] = (uint8_t)(u & 0xFF);
-        b[1] = (uint8_t)((u >> 8) & 0xFF);
-        b[2] = (uint8_t)((u >> 16) & 0xFF);
-        b[3] = (uint8_t)((u >> 24) & 0xFF);
-    } else {
-        uint32_t u = (uint32_t)lv;
-        b[0] = (uint8_t)(u & 0xFF);
-        b[1] = (uint8_t)((u >> 8) & 0xFF);
-        b[2] = (uint8_t)((u >> 16) & 0xFF);
-        b[3] = (uint8_t)((u >> 24) & 0xFF);
+        dst[0] = (uint8_t)((int8_t)lv);
+        return 1;
     }
 
+    uint32_t u;
+    if (strcmp(oper_t, "Addr32") == 0 || strcmp(oper_t, "Imm32") == 0) {
+        u = (uint32_t)(int32_t)lv;
+    } else {
+        u = (uint32_t)lv;
+    }
     for (int i = 0; i < sz; ++i) {
-        PyObject* v = PyLong_FromUnsignedLong((unsigned long)b[i]);
-        if (!v) return -1;
-        if (PyList_Append(out, v) != 0) {
-            Py_DECREF(v);
+        dst[i] = (uint8_t)((u >> (8 * i)) & 0xFFu);
+    }
+    return sz;
+}
+
+// Compute the byte width of one instruction given the operand-type list
+// from ``opcode_operand`` (an opaque list of strings like "Reg8", "UInt32",
+// "UInt32:S", "Double"). The trailing ":S" marker means "this operand is
+// a string id"; it does not affect the byte width. Returns -1 on error.
+static Py_ssize_t inst_size_from_operand_types(PyObject* operand_ts) {
+    Py_ssize_t m = PySequence_Size(operand_ts);
+    if (m < 0) return -1;
+    Py_ssize_t total = 1;  // opcode byte
+    for (Py_ssize_t k = 0; k < m; ++k) {
+        PyObject* spec = PySequence_GetItem(operand_ts, k);
+        if (!spec) return -1;
+        const char* s = PyUnicode_AsUTF8(spec);
+        if (!s) { Py_DECREF(spec); return -1; }
+        size_t len = strlen(s);
+        char base[32];
+        if (len >= sizeof(base)) {
+            Py_DECREF(spec);
+            PyErr_SetString(PyExc_ValueError, "operand type too long");
             return -1;
         }
-        Py_DECREF(v);
+        if (len >= 2 && s[len - 2] == ':' && s[len - 1] == 'S') {
+            memcpy(base, s, len - 2);
+            base[len - 2] = '\0';
+        } else {
+            memcpy(base, s, len + 1);
+        }
+        Py_DECREF(spec);
+        int sz = operand_size(base);
+        if (sz < 0) {
+            PyErr_SetString(PyExc_ValueError, "unknown operand type");
+            return -1;
+        }
+        total += sz;
     }
-    return 0;
+    return total;
 }
 
 static PyObject* fu_disassemble_ops(PyObject*, PyObject* args) {
@@ -321,6 +345,18 @@ static PyObject* fu_disassemble_ops(PyObject*, PyObject* args) {
     return insts;
 }
 
+// Returns a freshly-allocated ``bytearray`` containing the assembled bytes.
+//
+// Pre-PR: this returned ``list[int]`` of length ~= 5..10 MB on a real
+// React-Native bundle, with one ``PyLong`` allocation per byte. Round-trip
+// peak memory was dominated by the ~8x overhead of ``list[int]`` vs the
+// equivalent ``bytearray`` plus ~5M short-lived ``PyLong`` boxes.
+//
+// Post-PR: a single ``PyByteArray_FromStringAndSize`` allocation of the
+// exact final size, then a write-straight-into-the-buffer loop. Caller
+// (``HBCBase.setFunction`` / ``hasm.asm``) treats the return as a
+// bytes-like, so switching from ``list[int]`` to ``bytearray`` is
+// drop-in.
 static PyObject* fu_assemble_ops(PyObject*, PyObject* args) {
     PyObject* insts;
     PyObject* opcode_mapper_inv;
@@ -330,9 +366,43 @@ static PyObject* fu_assemble_ops(PyObject*, PyObject* args) {
     Py_ssize_t n = PySequence_Size(insts);
     if (n < 0) return nullptr;
 
-    PyObject* out = PyList_New(0);
-    if (!out) return nullptr;
+    // Pass 1: compute the exact total size by summing per-instruction
+    // widths. Requires ``opcode_operand`` (the opcode -> [operand-type]
+    // dict). This is cheap because the dict is already built and the
+    // operand-type list per opcode is short (typically 0-5 entries).
+    Py_ssize_t total_size = 0;
+    if (opcode_operand) {
+        for (Py_ssize_t i = 0; i < n; ++i) {
+            PyObject* inst = PySequence_GetItem(insts, i);
+            if (!inst) return nullptr;
+            PyObject* opcode = PySequence_GetItem(inst, 0);
+            Py_DECREF(inst);
+            if (!opcode) return nullptr;
+            PyObject* operand_ts = PyDict_GetItem(opcode_operand, opcode);  // borrowed
+            if (!operand_ts) {
+                Py_DECREF(opcode);
+                PyErr_SetString(PyExc_KeyError, "opcode missing in opcode_operand");
+                return nullptr;
+            }
+            Py_ssize_t sz = inst_size_from_operand_types(operand_ts);
+            Py_DECREF(opcode);
+            if (sz < 0) return nullptr;
+            total_size += sz;
+        }
+    } else {
+        // Caller didn't pass ``opcode_operand``. Use a generous estimate
+        // and resize at the end. (The Python wrapper always passes it,
+        // so this branch only runs when callers invoke
+        // ``_fastutil.assemble_ops`` directly without it.)
+        total_size = n * 16;
+    }
 
+    PyObject* out = PyByteArray_FromStringAndSize(nullptr, total_size);
+    if (!out) return nullptr;
+    uint8_t* buf = (uint8_t*)PyByteArray_AS_STRING(out);
+    Py_ssize_t off = 0;
+
+    // Pass 2: write opcode + operand bytes straight into the buffer.
     for (Py_ssize_t i = 0; i < n; ++i) {
         PyObject* inst = PySequence_GetItem(insts, i);
         if (!inst) {
@@ -367,23 +437,6 @@ static PyObject* fu_assemble_ops(PyObject*, PyObject* args) {
             return nullptr;
         }
 
-        PyObject* op_py = PyLong_FromLong(op);
-        if (!op_py) {
-            Py_DECREF(opcode);
-            Py_DECREF(operands);
-            Py_DECREF(out);
-            return nullptr;
-        }
-
-        if (PyList_Append(out, op_py) != 0) {
-            Py_DECREF(op_py);
-            Py_DECREF(opcode);
-            Py_DECREF(operands);
-            Py_DECREF(out);
-            return nullptr;
-        }
-        Py_DECREF(op_py);
-
         Py_ssize_t m = PySequence_Size(operands);
         if (m < 0) {
             Py_DECREF(opcode);
@@ -417,6 +470,21 @@ static PyObject* fu_assemble_ops(PyObject*, PyObject* args) {
             }
         }
 
+        // Defensive: if pass 1 underestimated, grow the buffer rather
+        // than overflow. Should never happen when ``opcode_operand``
+        // is consistent between the two passes.
+        if (off + 1 > total_size) {
+            total_size = off + 1 + 16;
+            if (PyByteArray_Resize(out, total_size) != 0) {
+                Py_DECREF(opcode);
+                Py_DECREF(operands);
+                Py_DECREF(out);
+                return nullptr;
+            }
+            buf = (uint8_t*)PyByteArray_AS_STRING(out);
+        }
+        buf[off++] = (uint8_t)(op & 0xFFu);
+
         for (Py_ssize_t k = 0; k < m; ++k) {
             PyObject* operand = PySequence_GetItem(operands, k);
             if (!operand) {
@@ -448,19 +516,44 @@ static PyObject* fu_assemble_ops(PyObject*, PyObject* args) {
                 return nullptr;
             }
 
-            int ok = append_operand_bytes(out, oper_t, val_obj);
+            // Reserve up to 8 bytes (max operand width: ``Double``).
+            if (off + 8 > total_size) {
+                total_size = off + 8 + 16;
+                if (PyByteArray_Resize(out, total_size) != 0) {
+                    Py_DECREF(type_obj);
+                    Py_DECREF(val_obj);
+                    Py_DECREF(opcode);
+                    Py_DECREF(operands);
+                    Py_DECREF(out);
+                    return nullptr;
+                }
+                buf = (uint8_t*)PyByteArray_AS_STRING(out);
+            }
+
+            int wrote = write_operand_bytes(buf + off, oper_t, val_obj);
             Py_DECREF(type_obj);
             Py_DECREF(val_obj);
-            if (ok != 0) {
+            if (wrote < 0) {
                 Py_DECREF(opcode);
                 Py_DECREF(operands);
                 Py_DECREF(out);
                 return nullptr;
             }
+            off += wrote;
         }
 
         Py_DECREF(opcode);
         Py_DECREF(operands);
+    }
+
+    if (off != total_size) {
+        // Truncate to actual written size if pre-pass over-allocated
+        // (e.g. ``opcode_operand`` was missing and we used the
+        // optimistic estimate).
+        if (PyByteArray_Resize(out, off) != 0) {
+            Py_DECREF(out);
+            return nullptr;
+        }
     }
 
     return out;
