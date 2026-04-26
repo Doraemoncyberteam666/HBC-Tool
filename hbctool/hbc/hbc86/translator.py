@@ -1,73 +1,31 @@
-import pathlib
-import json
-from hbctool import util as _util
-from hbctool.util import *
+"""Backward-compatibility shim.
 
-basepath = pathlib.Path(__file__).parent.absolute()
+Historically each ``hbctool.hbc.hbc<v>`` package exposed a ``disassemble``
+and ``assemble`` function. After the collapse refactor these live on
+:class:`hbctool.hbc._base.HBCBase`. This module keeps the old import
+paths working.
+"""
+from . import HBC86
+from hbctool.hbc._base import (
+    _assemble as _assemble_ops,
+    _disassemble as _disassemble_ops,
+    _load_opcodes,
+    _make_operand_types,
+)
 
-# Source _fastutil from hbctool.util so set_fastutil() can toggle it at runtime.
-_fastutil = _util._fastutil
-
-
-operand_type = {
-    "Reg8": (1, to_uint8, from_uint8),
-    "Reg32": (4, to_uint32, from_uint32),
-    "UInt8": (1, to_uint8, from_uint8),
-    "UInt16": (2, to_uint16, from_uint16),
-    "UInt32": (4, to_uint32, from_uint32),
-    "Addr8": (1, to_int8, from_int8),
-    "Addr32": (4, to_int32, from_int32),
-    "Imm32": (4, to_uint32, from_uint32),
-    "Double": (8, to_double, from_double)
-}
-
-with open(basepath / "data" / "opcode.json", "r") as f:
-    opcode_operand = json.load(f)
-opcode_mapper = list(opcode_operand.keys())
-opcode_mapper_inv = {}
-for i, v in enumerate(opcode_mapper):
-    opcode_mapper_inv[v] = i
+_HBC_CLS = HBC86
+_OPCODE_OPERAND, _OPCODE_MAPPER, _OPCODE_MAPPER_INV = _load_opcodes(_HBC_CLS.DATA_DIR)
+_OPERAND_TYPE = _make_operand_types(_HBC_CLS.IMM32_SIGNED)
 
 
 def disassemble(bc):
-    if _fastutil is not None:
-        return _fastutil.disassemble_ops(bc, opcode_mapper, opcode_operand)
+    """Disassemble a raw bytecode stream for HBC v86."""
+    return _disassemble_ops(bc, _OPCODE_MAPPER, _OPCODE_OPERAND, _OPERAND_TYPE)
 
-    i = 0
-    insts = []
-    while i < len(bc):
-        opcode = opcode_mapper[bc[i]]
-        i+=1
-        inst = (opcode, [])
-        operand_ts = opcode_operand[opcode]
-        for oper_t in operand_ts:
-            is_str = oper_t.endswith(":S")
-            if is_str:
-                oper_t = oper_t[:-2]
-                
-            size, conv_to, _ = operand_type[oper_t]
-            val = conv_to(bc[i:i+size])
-            inst[1].append((oper_t, is_str, val))
-            i+=size
-        
-        insts.append(inst)
-        
-    return insts
 
 def assemble(insts):
-    if _fastutil is not None:
-        return _fastutil.assemble_ops(insts, opcode_mapper_inv, opcode_operand)
+    """Assemble a structured op list for HBC v86 into a raw bytecode stream."""
+    return _assemble_ops(insts, _OPCODE_MAPPER_INV, _OPCODE_OPERAND, _OPERAND_TYPE)
 
-    bc = []
-    for opcode, operands in insts:
-        op = opcode_mapper_inv[opcode]
-        bc.append(op)
-        if not (len(opcode_operand[opcode]) == len(operands)):
-            raise ValueError(f"malformed instruction: {op}, {operands}")
-        for oper_t, _, val in operands:
-            if not (oper_t in operand_type):
-                raise ValueError(f"unknown operand type: {oper_t}")
-            _, _, conv_from = operand_type[oper_t]
-            bc += conv_from(val)
-    
-    return bc
+
+__all__ = ["assemble", "disassemble"]
