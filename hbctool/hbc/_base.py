@@ -127,20 +127,51 @@ def _make_operand_types(imm32_signed: bool) -> dict:
 # Parser / exporter.
 # ---------------------------------------------------------------------------
 
-def _struct_size(fmt) -> int:
-    """Bytes consumed by a single ``read(f, fmt)`` call."""
+def _field_bits(fmt) -> tuple[int, int]:
+    """Return ``(bits, bytes)`` consumed by a single ``read(f, fmt)`` call.
+
+    Bit-packed fields (``"bit"``) are returned as bits because
+    fractional bytes accumulate across all bit fields in a row before
+    being rounded up to a whole byte; rounding each one independently
+    truncates the size and lets crafted inputs slip past the
+    validation in ``_validate_header_sizes``.
+    """
     if not (isinstance(fmt, list) and len(fmt) == 3):
         raise TypeError(f"Unknown format spec: {fmt!r}")
     kind, bits_or_size, count = fmt
     if kind == "bytes":
         # ``bits_or_size`` is unused for "bytes"; ``count`` is the byte count.
-        return int(count)
-    return (int(bits_or_size) // 8) * int(count)
+        return 0, int(count)
+    if kind == "bit":
+        return int(bits_or_size) * int(count), 0
+    # "uint" / "int": bit width is always a multiple of 8.
+    return 0, (int(bits_or_size) // 8) * int(count)
+
+
+def _struct_size(fmt) -> int:
+    """Bytes consumed by a single ``read(f, fmt)`` call."""
+    bits, bytes_ = _field_bits(fmt)
+    return bytes_ + (bits + 7) // 8
 
 
 def _table_entry_size(table_fmt: dict) -> int:
-    """Bytes per row of a table (dict of field-formats)."""
-    return sum(_struct_size(field_fmt) for field_fmt in table_fmt.values())
+    """Bytes per row of a table (dict of field-formats).
+
+    Bit-packed fields are summed at the bit level across the entire
+    row, then rounded up to whole bytes once. Other fields are
+    accumulated in bytes directly. This matches how the parser reads
+    each row: the ``BitReader``'s accumulator carries leftover bits
+    between consecutive ``"bit"`` fields, and the row ends on a whole
+    byte (the per-version structure JSON files are designed so the
+    bit-field totals are multiples of 8).
+    """
+    total_bits = 0
+    total_bytes = 0
+    for fmt in table_fmt.values():
+        bits, bytes_ = _field_bits(fmt)
+        total_bits += bits
+        total_bytes += bytes_
+    return total_bytes + (total_bits + 7) // 8
 
 
 def _aligned(n: int, alignment: int = BYTECODE_ALIGNMENT) -> int:
