@@ -47,9 +47,25 @@ def write_func(f, func, i, hbc):
     f.write("EndFunction\n\n")
 
 
+class _BytearrayJSONEncoder(json.JSONEncoder):
+    """JSON encoder that serializes ``bytearray`` / ``bytes`` as lists of ints.
+
+    The HBC parser stores the instruction stream as a ``bytearray``
+    (one byte per element) for memory efficiency, but the on-disk
+    HASM ``metadata.json`` historically represented it as a JSON array
+    of ints. Stay backward-compatible with previously-dumped HASM
+    directories by emitting the same array form.
+    """
+
+    def default(self, o):
+        if isinstance(o, (bytearray, bytes)):
+            return list(o)
+        return super().default(o)
+
+
 def _write_json_file(path, obj, indent=None):
     with open(path, "w") as f:
-        json.dump(obj, f, indent=indent)
+        json.dump(obj, f, indent=indent, cls=_BytearrayJSONEncoder)
 
 def dump(hbc, path, force=False):
     if os.path.exists(path) and not force:
