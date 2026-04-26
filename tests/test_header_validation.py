@@ -80,3 +80,40 @@ def test_huge_string_count_rejected(fixture_bytes, header_layout):
     _patch_uint(data, header_layout, "stringCount", 0x40000000)
     with pytest.raises(ValueError, match=r"stringCount"):
         hbc.load(BytesIO(bytes(data)))
+
+
+def test_table_entry_size_handles_bit_packed_rows():
+    """``_table_entry_size`` must compute byte sizes for bit-packed
+    rows by summing bits across the whole row and rounding once -- not
+    by truncating each bit field independently. Otherwise a crafted
+    bundle with an inflated table count can sneak past the validation.
+    """
+    from hbctool.hbc._base import _table_entry_size
+
+    layout = json.loads(HBC96_STRUCTURE.read_text())
+
+    # SmallFuncHeader = 9 bit fields summing to 25+7+15+17+25+7+8+8+8 = 120 bits
+    # plus a trailing uint8 = 16 bytes per row.
+    assert _table_entry_size(layout["SmallFuncHeader"]) == 16
+
+    # SmallStringTableEntry = 1+23+8 bits = 32 bits = 4 bytes per row.
+    assert _table_entry_size(layout["SmallStringTableEntry"]) == 4
+
+
+def test_huge_function_count_with_correct_smallfuncheader_size(fixture_bytes, header_layout):
+    """Regression: the old ``_struct_size`` underestimated SmallFuncHeader
+    at 13 bytes (instead of the real 16). With the corrected size, a
+    smaller crafted ``functionCount`` is rejected -- a count that fit
+    "within file size" using the buggy 13-byte denominator must still
+    be rejected by the corrected 16-byte denominator.
+    """
+    file_size = len(fixture_bytes)
+    # Pick N such that N * 13 <= file_size but N * 16 > file_size.
+    n = (file_size // 13) - 1
+    assert n * 13 <= file_size, "test setup invalid"
+    assert n * 16 > file_size, "test setup invalid"
+
+    data = bytearray(fixture_bytes)
+    _patch_uint(data, header_layout, "functionCount", n)
+    with pytest.raises(ValueError, match=r"functionCount"):
+        hbc.load(BytesIO(bytes(data)))
