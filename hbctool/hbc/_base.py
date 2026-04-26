@@ -632,6 +632,18 @@ class HBCBase:
         return self.obj
 
     def setObj(self, obj):
+        # JSON deserialisation produces ``inst`` as ``list[int]`` because
+        # JSON has no ``bytes``/``bytearray`` representation. Convert it to
+        # ``bytearray`` here so every consumer (``getFunction``,
+        # ``setFunction``, ``_rebuild_function_offsets``, etc.) sees the
+        # same compact, mutable byte buffer they would see after loading
+        # from a binary bundle. Without this, the ``hasm.asm`` round-trip
+        # path keeps a ``list[int]`` -- ~8 bytes per byte plus per-byte
+        # slice/concat overhead -- whereas the binary-load path uses a
+        # ``bytearray`` (1 byte per byte, ``memcpy``-friendly).
+        inst = obj.get("inst")
+        if inst is not None and not isinstance(inst, (bytearray, bytes)):
+            obj["inst"] = bytearray(inst)
         self.obj = obj
 
     def getVersion(self):
