@@ -127,6 +127,163 @@ def _make_operand_types(imm32_signed: bool) -> dict:
 # Parser / exporter.
 # ---------------------------------------------------------------------------
 
+def _field_bits(fmt) -> tuple[int, int]:
+    """Return ``(bits, bytes)`` consumed by a single ``read(f, fmt)`` call.
+
+    Bit-packed fields (``"bit"``) are returned as bits because
+    fractional bytes accumulate across all bit fields in a row before
+    being rounded up to a whole byte; rounding each one independently
+    truncates the size and lets crafted inputs slip past the
+    validation in ``_validate_header_sizes``.
+    """
+    if not (isinstance(fmt, list) and len(fmt) == 3):
+        raise TypeError(f"Unknown format spec: {fmt!r}")
+    kind, bits_or_size, count = fmt
+    if kind == "bytes":
+        # ``bits_or_size`` is unused for "bytes"; ``count`` is the byte count.
+        return 0, int(count)
+    if kind == "bit":
+        return int(bits_or_size) * int(count), 0
+    # "uint" / "int": bit width is always a multiple of 8.
+    return 0, (int(bits_or_size) // 8) * int(count)
+
+
+def _struct_size(fmt) -> int:
+    """Bytes consumed by a single ``read(f, fmt)`` call."""
+    bits, bytes_ = _field_bits(fmt)
+    return bytes_ + (bits + 7) // 8
+
+
+def _table_entry_size(table_fmt: dict) -> int:
+    """Bytes per row of a table (dict of field-formats).
+
+    Bit-packed fields are summed at the bit level across the entire
+    row, then rounded up to whole bytes once. Other fields are
+    accumulated in bytes directly. This matches how the parser reads
+    each row: the ``BitReader``'s accumulator carries leftover bits
+    between consecutive ``"bit"`` fields, and the row ends on a whole
+    byte (the per-version structure JSON files are designed so the
+    bit-field totals are multiples of 8).
+    """
+    total_bits = 0
+    total_bytes = 0
+    for fmt in table_fmt.values():
+        bits, bytes_ = _field_bits(fmt)
+        total_bits += bits
+        total_bytes += bytes_
+    return total_bytes + (total_bits + 7) // 8
+
+
+def _aligned(n: int, alignment: int = BYTECODE_ALIGNMENT) -> int:
+    return (n + alignment - 1) & ~(alignment - 1)
+
+
+def _validate_header_sizes(header: dict, structure: dict, total_size: int) -> None:
+    """Cheap upfront sanity check: every header-claimed size must fit
+    inside the file.
+
+    This catches crafted bundles that would otherwise allocate huge
+    buffers (e.g. ``stringStorageSize = 0xFFFFFFFF``) before the parser
+    notices the file is smaller than that. It is intentionally
+    conservative -- it only checks for sizes that are *individually*
+    larger than the entire file, plus a cumulative lower-bound on the
+    file's total size, both of which any legitimate bundle satisfies
+    trivially.
+    """
+    if total_size < 0:
+        raise ValueError("Hermes bundle has negative size")
+
+    # Per-segment caps: a single segment cannot be larger than the file.
+    _check_size(header, "stringStorageSize", total_size)
+    _check_size(header, "arrayBufferSize", total_size)
+    _check_size(header, "objKeyBufferSize", total_size)
+    _check_size(header, "objValueBufferSize", total_size)
+    _check_size(header, "regExpStorageSize", total_size)
+
+    # Per-count caps: a count of N entries cannot need more than file_size
+    # bytes' worth of fixed-width rows.
+    fixed_segments = [
+        ("functionCount", structure["SmallFuncHeader"]),
+        ("stringKindCount", None),  # 4 bytes per entry (uint32)
+        ("identifierCount", None),  # 4 bytes per entry (uint32)
+        ("stringCount", structure["SmallStringTableEntry"]),
+        ("overflowStringCount", structure["OverflowStringTableEntry"]),
+        ("regExpCount", structure["RegExpTableEntry"]),
+        ("cjsModuleCount", structure["CJSModuleTable"]),
+    ]
+    for count_key, table_fmt in fixed_segments:
+        if count_key not in header:
+            continue
+        n = int(header[count_key])
+        if n < 0:
+            raise ValueError(
+                f"Hermes header has invalid {count_key}={n} (negative)"
+            )
+        per_row = 4 if table_fmt is None else _table_entry_size(table_fmt)
+        if per_row > 0 and n > 0 and n > total_size // per_row:
+            raise ValueError(
+                f"Hermes header has invalid {count_key}={n} "
+                f"(would require {n * per_row} bytes; file is {total_size} bytes)"
+            )
+
+    # Cumulative lower bound: the sum of every fixed-width segment plus
+    # every variable-width blob, each rounded up to the bytecode
+    # alignment, plus the fixed header itself, must fit in the file.
+    header_bytes = _aligned(_table_entry_size(structure["header"]))
+    blob_bytes = sum(
+        _aligned(int(header[k]))
+        for k in (
+            "stringStorageSize",
+            "arrayBufferSize",
+            "objKeyBufferSize",
+            "objValueBufferSize",
+            "regExpStorageSize",
+        )
+        if k in header
+    )
+    table_bytes = 0
+    for count_key, table_fmt in fixed_segments:
+        if count_key not in header:
+            continue
+        n = int(header[count_key])
+        per_row = 4 if table_fmt is None else _table_entry_size(table_fmt)
+        table_bytes += _aligned(n * per_row)
+
+    minimum_bytes = header_bytes + blob_bytes + table_bytes
+    if minimum_bytes > total_size:
+        raise ValueError(
+            "Hermes header claims more on-disk content than the file "
+            f"holds (>= {minimum_bytes} bytes required; file is {total_size} bytes)"
+        )
+
+
+def _check_size(header: dict, key: str, total_size: int) -> None:
+    if key not in header:
+        return
+    n = int(header[key])
+    if n < 0:
+        raise ValueError(f"Hermes header has invalid {key}={n} (negative)")
+    if n > total_size:
+        raise ValueError(
+            f"Hermes header has invalid {key}={n} "
+            f"(larger than file size {total_size})"
+        )
+
+
+def _file_size(f) -> int:
+    """Best-effort total size of the BitReader's underlying buffer.
+
+    BitReader caches the entire input into ``self.cache``; that's our
+    ground truth for "how big is this file". When ``cache`` isn't
+    available (e.g. a future streaming reader), fall back to ``-1`` so
+    callers know the check has to be skipped.
+    """
+    cache = getattr(f, "cache", None)
+    if cache is None:
+        return -1
+    return len(cache)
+
+
 def _parse(f, structure: dict, identifier_field: str) -> dict:
     headerS = structure["header"]
     smallFunctionHeaderS = structure["SmallFuncHeader"]
@@ -148,6 +305,12 @@ def _parse(f, structure: dict, identifier_field: str) -> dict:
     for key in headerS:
         header[key] = read(f, headerS[key])
     obj["header"] = header
+
+    # Reject obviously-malformed bundles before doing any expensive work.
+    total_size = _file_size(f)
+    if total_size >= 0:
+        _validate_header_sizes(header, structure, total_size)
+
     f.pad(BYTECODE_ALIGNMENT)
 
     # Segment 2: Function Headers (with overflow follow-ups).
@@ -395,7 +558,10 @@ def _assemble(insts, opcode_mapper_inv, opcode_operand, operand_type):
     if _util._fastutil is not None:
         return _util._fastutil.assemble_ops(insts, opcode_mapper_inv, opcode_operand)
 
-    bc: list = []
+    # Use a ``bytearray`` rather than a ``list[int]``: every byte costs
+    # ~1 byte of memory instead of ~8, and concatenation goes through
+    # ``memcpy`` instead of a per-element refcount bump.
+    bc = bytearray()
     for opcode, operands in insts:
         op = opcode_mapper_inv[opcode]
         bc.append(op)
@@ -405,7 +571,7 @@ def _assemble(insts, opcode_mapper_inv, opcode_operand, operand_type):
             if not (oper_t in operand_type):
                 raise ValueError(f"unknown operand type: {oper_t}")
             _, _, conv_from = operand_type[oper_t]
-            bc += conv_from(val)
+            bc += bytearray(conv_from(val))
     return bc
 
 
@@ -550,16 +716,21 @@ class HBCBase:
 
     def _rebuild_function_offsets(self):
         function_headers = self.getObj()["functionHeaders"]
+        inst = self.getObj()["inst"]
+        inst_offset = self.getObj()["instOffset"]
+
+        # Collect every function's bytecode slice and the new offset it
+        # will land at, in one pass; concatenate via a single bytearray
+        # to avoid the ~24x memory blowup of building a Python ``list``
+        # of ints.
         chunks = []
         for function_header in function_headers:
-            offset = function_header["offset"]
-            bytecode_size = function_header["bytecodeSizeInBytes"]
-            start = offset - self.getObj()["instOffset"]
-            end = start + bytecode_size
-            chunks.append(self.getObj()["inst"][start:end])
+            start = function_header["offset"] - inst_offset
+            end = start + function_header["bytecodeSizeInBytes"]
+            chunks.append(inst[start:end])
 
-        new_inst: list = []
-        current_offset = self.getObj()["instOffset"]
+        new_inst = bytearray()
+        current_offset = inst_offset
         for function_header, chunk in zip(function_headers, chunks):
             function_header["offset"] = current_offset
             function_header["bytecodeSizeInBytes"] = len(chunk)
@@ -583,7 +754,10 @@ class HBCBase:
 
         string_storage = self.getObj()["stringStorage"]
         offset = len(string_storage)
-        string_storage.extend([0] * byte_length)
+        # ``bytes(byte_length)`` is a single zero-filled allocation;
+        # ``[0] * byte_length`` builds a Python ``list`` of N int
+        # objects, each taking ~8 bytes of pointer overhead.
+        string_storage.extend(bytes(byte_length))
 
         header["stringStorageSize"] = len(string_storage)
         if delta:

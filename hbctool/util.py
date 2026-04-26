@@ -277,7 +277,13 @@ class BitReader(object):
         self._ensure_cache(float('inf'))
         a = self.cache[self.read:]
         self.read += len(a)
-        return list(a)
+        # Return a ``bytearray`` rather than a ``list[int]``: every byte
+        # then costs ~1 byte of memory instead of ~8 bytes, and slicing
+        # / extending stays O(n) but with a real memcpy instead of a
+        # per-element refcount bump. Downstream code (parsers,
+        # ``memcpy``, slice-assignment, ``del [a:b]``) treats lists and
+        # bytearrays interchangeably.
+        return bytearray(a)
 
 # File utilization function
 # Read
