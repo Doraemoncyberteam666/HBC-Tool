@@ -621,7 +621,11 @@ static PyObject* fu_memcpy(PyObject*, PyObject* args) {
     // Bytearray destination: contiguous mutable buffer, real memcpy path.
     if (PyByteArray_Check(dest)) {
         Py_ssize_t dest_len = PyByteArray_GET_SIZE(dest);
-        if (start + length > dest_len) {
+        // Overflow-safe equivalent of ``start + length > dest_len``: matches
+        // the pattern in ``read_bytes`` (line 43). Computing ``start + length``
+        // directly is undefined behaviour on signed overflow and in practice
+        // wraps to a large negative value, bypassing the bounds check.
+        if (start > dest_len || length > dest_len - start) {
             PyErr_SetString(PyExc_IndexError, "memcpy: dest too small");
             return nullptr;
         }
@@ -638,6 +642,8 @@ static PyObject* fu_memcpy(PyObject*, PyObject* args) {
                 src_buf = PyBytes_AS_STRING(src);
                 src_len = PyBytes_GET_SIZE(src);
             }
+            // ``length`` and ``src_len`` are both already non-negative here,
+            // so this comparison is overflow-safe.
             if (length > src_len) {
                 PyErr_SetString(PyExc_IndexError, "memcpy: src too small");
                 return nullptr;
@@ -665,7 +671,7 @@ static PyObject* fu_memcpy(PyObject*, PyObject* args) {
     // Legacy list[int] destination (kept so external callers keep working).
     if (PyList_Check(dest)) {
         Py_ssize_t dest_len = PyList_GET_SIZE(dest);
-        if (start + length > dest_len) {
+        if (start > dest_len || length > dest_len - start) {
             PyErr_SetString(PyExc_IndexError, "memcpy: dest too small");
             return nullptr;
         }

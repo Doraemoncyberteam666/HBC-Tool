@@ -58,6 +58,31 @@ def test_memcpy_bytearray_dest_with_bytearray_src():
     assert dest == bytearray([0, 1, 2, 3, 0])
 
 
+def test_memcpy_rejects_signed_overflow_args():
+    """``start + length`` could wrap on ``Py_ssize_t`` overflow and bypass
+    the dest-size bounds check, allowing a heap buffer overflow. The C
+    extension must handle this safely (the pure-Python fallback gets the
+    same protection from CPython's slice handling)."""
+    import sys
+    import hbctool.util as u
+
+    if u._fastutil is None:
+        return  # pure-Python path is fine; nothing to regress.
+
+    dest = bytearray(16)
+    src = b"\x00" * 16
+    huge = sys.maxsize  # 2**63 - 1 on a 64-bit box; ``huge + huge`` wraps negative.
+
+    import pytest
+
+    with pytest.raises((IndexError, OverflowError, ValueError)):
+        u.memcpy(dest, src, huge, huge)
+    with pytest.raises((IndexError, OverflowError, ValueError)):
+        u.memcpy(dest, src, 0, huge)
+    with pytest.raises((IndexError, OverflowError, ValueError)):
+        u.memcpy(dest, src, huge, 0)
+
+
 def test_memcpy_setfunction_roundtrip():
     """End-to-end: load a real HBC bundle, get a function, set it back
     unchanged. This is the path that crashed with the C extension."""
