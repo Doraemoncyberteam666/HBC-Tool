@@ -53,23 +53,27 @@ pipx install git+https://github.com/Doraemoncyberteam666/HBC-Tool.git
 ```
 ### Build the optional native extension
 
+Wheels published on PyPI ship the compiled native modules, and `hbctool`
+will use them automatically if they are importable. To build them in a
+local source checkout:
+
 ```bash
 python3 setup.py build_ext --inplace
 ```
 
-Enable the accelerated path at runtime:
+Verify that the native modules are loaded:
 
 ```bash
-export HBCTOOL_FASTUTIL=1
+python3 -c "from hbctool import util; print('native:', util.is_fastutil_enabled())"
 ```
 
-Verify that the native modules are available:
+If the extensions are not present, `hbctool` still works in pure-Python
+mode. To force pure-Python execution even when the extensions are
+available (useful when debugging):
 
 ```bash
-python3 -c "import hbctool._fastutil, hbctool._bitcodec; print('native extensions ok')"
+export HBCTOOL_FASTUTIL=0
 ```
-
-If the extensions are not present, `hbctool` still works in pure-Python mode.
 
 ## Usage
 
@@ -140,10 +144,10 @@ Run the test suite:
 python3 -m pytest -q
 ```
 
-Run the test suite with the native path enabled:
+Run the test suite with the native path forced off (pure-Python only):
 
 ```bash
-HBCTOOL_FASTUTIL=1 python3 -m pytest -q
+HBCTOOL_FASTUTIL=0 python3 -m pytest -q
 ```
 
 Build distributable artifacts:
