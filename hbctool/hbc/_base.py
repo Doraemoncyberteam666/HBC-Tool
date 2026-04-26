@@ -558,7 +558,10 @@ def _assemble(insts, opcode_mapper_inv, opcode_operand, operand_type):
     if _util._fastutil is not None:
         return _util._fastutil.assemble_ops(insts, opcode_mapper_inv, opcode_operand)
 
-    bc: list = []
+    # Use a ``bytearray`` rather than a ``list[int]``: every byte costs
+    # ~1 byte of memory instead of ~8, and concatenation goes through
+    # ``memcpy`` instead of a per-element refcount bump.
+    bc = bytearray()
     for opcode, operands in insts:
         op = opcode_mapper_inv[opcode]
         bc.append(op)
@@ -568,7 +571,7 @@ def _assemble(insts, opcode_mapper_inv, opcode_operand, operand_type):
             if not (oper_t in operand_type):
                 raise ValueError(f"unknown operand type: {oper_t}")
             _, _, conv_from = operand_type[oper_t]
-            bc += conv_from(val)
+            bc += bytearray(conv_from(val))
     return bc
 
 
@@ -713,16 +716,21 @@ class HBCBase:
 
     def _rebuild_function_offsets(self):
         function_headers = self.getObj()["functionHeaders"]
+        inst = self.getObj()["inst"]
+        inst_offset = self.getObj()["instOffset"]
+
+        # Collect every function's bytecode slice and the new offset it
+        # will land at, in one pass; concatenate via a single bytearray
+        # to avoid the ~24x memory blowup of building a Python ``list``
+        # of ints.
         chunks = []
         for function_header in function_headers:
-            offset = function_header["offset"]
-            bytecode_size = function_header["bytecodeSizeInBytes"]
-            start = offset - self.getObj()["instOffset"]
-            end = start + bytecode_size
-            chunks.append(self.getObj()["inst"][start:end])
+            start = function_header["offset"] - inst_offset
+            end = start + function_header["bytecodeSizeInBytes"]
+            chunks.append(inst[start:end])
 
-        new_inst: list = []
-        current_offset = self.getObj()["instOffset"]
+        new_inst = bytearray()
+        current_offset = inst_offset
         for function_header, chunk in zip(function_headers, chunks):
             function_header["offset"] = current_offset
             function_header["bytecodeSizeInBytes"] = len(chunk)
@@ -746,7 +754,10 @@ class HBCBase:
 
         string_storage = self.getObj()["stringStorage"]
         offset = len(string_storage)
-        string_storage.extend([0] * byte_length)
+        # ``bytes(byte_length)`` is a single zero-filled allocation;
+        # ``[0] * byte_length`` builds a Python ``list`` of N int
+        # objects, each taking ~8 bytes of pointer overhead.
+        string_storage.extend(bytes(byte_length))
 
         header["stringStorageSize"] = len(string_storage)
         if delta:
