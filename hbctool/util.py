@@ -1,22 +1,68 @@
 
 from struct import pack, unpack
 from struct import error as StructError
+import importlib
 import importlib.util
 import os
+import sys
 
 
-_FASTUTIL_ENABLED = os.environ.get("HBCTOOL_FASTUTIL", "0") == "1"
-_FASTUTIL_SPEC = importlib.util.find_spec("hbctool._fastutil") if _FASTUTIL_ENABLED else None
-_BITCODEC_SPEC = importlib.util.find_spec("hbctool._bitcodec") if _FASTUTIL_ENABLED else None
-if _FASTUTIL_SPEC is not None:
-    from hbctool import _fastutil
-else:
-    _fastutil = None
+def _try_import(name):
+    """Return the imported module, or None if it cannot be imported."""
+    spec = importlib.util.find_spec(name)
+    if spec is None:
+        return None
+    try:
+        return importlib.import_module(name)
+    except ImportError:
+        return None
 
-if _BITCODEC_SPEC is not None:
-    from hbctool import _bitcodec
-else:
-    _bitcodec = None
+
+def _native_default():
+    """Default native-acceleration state.
+
+    Loads the C extensions if they are importable. Set the environment
+    variable ``HBCTOOL_FASTUTIL=0`` to force pure-Python execution
+    (useful when debugging or when the extensions are misbehaving).
+    """
+    if os.environ.get("HBCTOOL_FASTUTIL", "").lower() in ("0", "false", "off", "no"):
+        return None, None
+    return _try_import("hbctool._fastutil"), _try_import("hbctool._bitcodec")
+
+
+_fastutil, _bitcodec = _native_default()
+
+
+def is_fastutil_enabled():
+    """Return True if the native acceleration modules are currently active."""
+    return _fastutil is not None
+
+
+def set_fastutil(enabled):
+    """Enable or disable native acceleration at runtime.
+
+    When called, this function also propagates the change to every already-
+    imported ``hbctool.hbc.hbc<v>.translator`` module, so existing
+    translator caches stay in sync.
+
+    Returns True if native acceleration is active after the call.
+    """
+    global _fastutil, _bitcodec
+    if enabled:
+        _fastutil = _try_import("hbctool._fastutil")
+        _bitcodec = _try_import("hbctool._bitcodec")
+    else:
+        _fastutil = None
+        _bitcodec = None
+
+    for mod_name, mod in list(sys.modules.items()):
+        if not mod_name or mod is None:
+            continue
+        if mod_name.startswith("hbctool.hbc.") and mod_name.endswith(".translator"):
+            if hasattr(mod, "_fastutil"):
+                mod._fastutil = _fastutil
+
+    return _fastutil is not None
 
 # File Object
 

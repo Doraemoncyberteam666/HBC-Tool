@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import importlib
 import json
 import shutil
 import statistics
@@ -21,8 +20,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-import hbctool
-import hbctool.util as util
+import hbctool  # noqa: E402  (path setup before import)
+import hbctool.util as util  # noqa: E402
 
 
 @dataclass
@@ -54,24 +53,7 @@ def set_fastutil_mode(enable_cpp: bool) -> bool:
 
     Returns True if C++ mode is active after the call.
     """
-    module = None
-    if enable_cpp:
-        spec = importlib.util.find_spec("hbctool._fastutil")
-        if spec is None:
-            util._fastutil = None
-            module = None
-        else:
-            module = importlib.import_module("hbctool._fastutil")
-            util._fastutil = module
-    else:
-        util._fastutil = None
-
-    # Keep all already-loaded translator modules in sync.
-    for mod_name, mod in list(sys.modules.items()):
-        if mod_name and mod_name.endswith(".translator") and hasattr(mod, "_fastutil"):
-            mod._fastutil = module
-
-    return module is not None
+    return util.set_fastutil(enable_cpp)
 
 
 def run_roundtrip(input_file: Path, out_dir: Path, label: str, enable_cpp: bool, force_clean: bool = True) -> RunMetrics:
