@@ -81,25 +81,35 @@ Show help:
 
 ```bash
 hbctool --help
+hbctool disasm --help
+hbctool asm --help
+hbctool info --help
 ```
 
 CLI syntax:
 
 ```text
-Usage:
-    hbctool disasm <HBC_FILE> [<HASM_PATH>]
-    hbctool asm [<HASM_PATH>] [<HBC_FILE>]
-    hbctool --help
-    hbctool --version
+hbctool [--version] [-q | -v] COMMAND [ARGS...]
+
+  disasm (d) [-y | --force] HBC_FILE [HASM_PATH]
+  asm    (a)                [HASM_PATH] [HBC_FILE]
+  info                      HBC_FILE
 ```
+
+Global options:
+
+- `-q, --quiet` — only print warnings and errors
+- `-v, --verbose` — print debug-level logging
 
 Examples:
 
 ```bash
 hbctool disasm index.android.bundle test_hasm
 hbctool asm test_hasm index.android.bundle
-hbctool disasm index.android.bundle
-hbctool asm
+hbctool disasm index.android.bundle           # writes to ./hasm by default
+hbctool asm                                   # reads ./hasm, writes ./index.android.bundle
+hbctool disasm -y index.android.bundle hasm   # overwrite an existing hasm/ without prompting
+hbctool info index.android.bundle             # show metadata only
 ```
 
 By default:
