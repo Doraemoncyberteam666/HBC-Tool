@@ -648,7 +648,14 @@ static PyObject* fu_memcpy(PyObject*, PyObject* args) {
                 PyErr_SetString(PyExc_IndexError, "memcpy: src too small");
                 return nullptr;
             }
-            memcpy(dest_buf + start, src_buf, (size_t)length);
+            // ``memmove``, not ``memcpy``: a Python caller can legitimately
+            // pass overlapping (or identical) buffers --
+            // ``util.memcpy(x, x, 1, 4)`` is well-defined Python and must
+            // produce the same result as a slice assignment.  ``memcpy``
+            // is undefined behaviour on overlap; ``memmove`` handles both
+            // overlapping and disjoint regions and is the same speed on
+            // every modern libc.
+            memmove(dest_buf + start, src_buf, (size_t)length);
             Py_RETURN_NONE;
         }
 
