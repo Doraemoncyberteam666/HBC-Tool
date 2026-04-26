@@ -47,7 +47,7 @@ class TestHBC76(unittest.TestCase):
             target_functionName, _, target_paramCount, target_registerCount, target_symbolCount = target_args[i]
             try:
                 functionName, paramCount, registerCount, symbolCount, _, funcHeader = self.hbc.getFunction(i)
-            except AssertionError:
+            except (AssertionError, IndexError, ValueError):
                 self.fail()
 
             self.assertEqual(functionName, target_functionName)

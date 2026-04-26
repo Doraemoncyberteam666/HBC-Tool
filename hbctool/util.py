@@ -34,12 +34,6 @@ class BitWriter(object):
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.flush()
 
-    def __del__(self):
-        try:
-            self.flush()
-        except ValueError:   # I/O operation on closed file.
-            pass
-
     def _writebit(self, bit, remaining=-1):
         if remaining > -1:
             self.accumulator |= bit << (remaining - 1)
@@ -55,7 +49,8 @@ class BitWriter(object):
         self.remained = remaining
     
     def _writebyte(self, b):
-        assert not self.bcount, "bcount is not zero."
+        if not (not self.bcount):
+            raise ValueError("bcount is not zero.")
         self.out.write(bytes((b,)))
         self.write += 1
 
@@ -71,11 +66,16 @@ class BitWriter(object):
     def writebytes(self, v, n):
         if n <= 0:
             return v
-        assert not self.bcount, "bcount is not zero."
-        data = v.to_bytes(n, byteorder="little", signed=False)
+        if self.bcount:
+            raise ValueError("writebytes called while pending bits are buffered")
+        # Big-endian to mirror BitReader.readbytes (which is big-endian).
+        # Note: integer encoding through readuint/writeuint always goes via
+        # int.from_bytes / int.to_bytes with byteorder="little" and does
+        # not use this path.
+        data = v.to_bytes(n, byteorder="big", signed=False)
         self.out.write(data)
         self.write += len(data)
-        
+
         return v >> (n * 8)
 
     def flush(self):
@@ -95,7 +95,8 @@ class BitWriter(object):
         return self.write
 
     def pad(self, alignment):
-        assert alignment > 0 and alignment <= 8 and ((alignment & (alignment - 1)) == 0), "Support alignment as many as 8 bytes."
+        if not (alignment > 0 and alignment <= 8 and ((alignment & (alignment - 1)) == 0)):
+            raise ValueError(f"alignment must be a power of two in [1, 8], got {alignment}")
         l = self.tell()
         if l % alignment == 0:
             return
@@ -109,18 +110,21 @@ class BitWriter(object):
 
 class BitReader(object):
     def __init__(self, f):
+        if not hasattr(f, 'read'):
+            raise TypeError(
+                f"BitReader expects a readable file-like object, got {type(f).__name__!r}"
+            )
         self.input = f
-        if hasattr(f, 'read'):
-            if hasattr(f, 'seek') and hasattr(f, 'tell'):
-                try:
-                    f.seek(0)
-                    self.cache = f.read()
-                except (OSError, ValueError):
-                    self.cache = f.read()
-            else:
-                self.cache = f.read()
+        if hasattr(f, 'seek') and hasattr(f, 'tell'):
+            try:
+                f.seek(0)
+                initial = f.read()
+            except (OSError, ValueError):
+                initial = f.read()
         else:
-            self.cache = bytes()
+            initial = f.read()
+        # Use bytearray so _ensure_cache can grow without O(n^2) reallocs.
+        self.cache = bytearray(initial)
         self.accumulator = 0
         self.bcount = 0
         self.read = 0
@@ -136,7 +140,7 @@ class BitReader(object):
             if hasattr(self.input, 'read'):
                 more = self.input.read()
                 if more:
-                    self.cache += more
+                    self.cache.extend(more)
             return
 
         if self.read + n > len(self.cache):
@@ -145,10 +149,11 @@ class BitReader(object):
                 if not more:
                     more = self.input.read()
                 if more:
-                    self.cache += more
+                    self.cache.extend(more)
 
     def read_raw(self, n):
-        assert not self.bcount, "bcount is not zero."
+        if not (not self.bcount):
+            raise ValueError("bcount is not zero.")
         self._ensure_cache(n)
         data = self.cache[self.read : self.read + n]
         if len(data) != n:
@@ -166,7 +171,8 @@ class BitReader(object):
             self.bcount = 8
 
         if remaining > -1:
-            assert remaining <= self.bcount, f"WTF ({remaining}, {self.bcount})"
+            if not (remaining <= self.bcount):
+                raise ValueError(f"BitReader: requested {remaining} bits but only {self.bcount} bits buffered")
             return (self.accumulator & (1 << remaining-1)) >> remaining-1
 
         rv = (self.accumulator & (1 << self.bcount-1)) >> self.bcount-1
@@ -178,7 +184,8 @@ class BitReader(object):
         self.accumulator = self.accumulator >> remaining
 
     def _readbyte(self):
-        assert not self.bcount, "bcount is not zero."
+        if not (not self.bcount):
+            raise ValueError("bcount is not zero.")
         self._ensure_cache(1)
         if self.read >= len(self.cache):
             raise EOFError("Unexpected EOF while reading a byte.")
@@ -211,7 +218,8 @@ class BitReader(object):
         return self.read
     
     def pad(self, alignment):
-        assert alignment > 0 and alignment <= 8 and ((alignment & (alignment - 1)) == 0), "Support alignment as many as 8 bytes."
+        if not (alignment > 0 and alignment <= 8 and ((alignment & (alignment - 1)) == 0)):
+            raise ValueError(f"alignment must be a power of two in [1, 8], got {alignment}")
         l = self.tell()
         if l % alignment == 0:
             return
@@ -228,7 +236,8 @@ class BitReader(object):
 # File utilization function
 # Read
 def readuint(f, bits=64, signed=False):
-    assert bits % 8 == 0, "Not support"
+    if not (bits % 8 == 0):
+        raise ValueError(f"unsupported bit width {bits}: must be a multiple of 8")
     if bits == 8:
         b = f.readbytes(1)
         if signed and (b & 0x80):
@@ -298,7 +307,8 @@ def read(f, format):
 
 # Write
 def writeuint(f, v, bits=64, signed=False):
-    assert bits % 8 == 0, "Not support"
+    if not (bits % 8 == 0):
+        raise ValueError(f"unsupported bit width {bits}: must be a multiple of 8")
 
     if bits == 8:
         if signed:
@@ -307,7 +317,8 @@ def writeuint(f, v, bits=64, signed=False):
         return
 
     n = bits // 8
-    assert not f.bcount, "bcount is not zero."
+    if not (not f.bcount):
+        raise ValueError("bcount is not zero.")
     v = v & ((1 << bits) - 1)
     if _bitcodec is not None and n <= 8:
         data = _bitcodec.uint_to_le(v, n)
