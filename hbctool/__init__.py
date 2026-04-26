@@ -1,42 +1,20 @@
-"""
-A command-line interface for disassembling and assembling
-the Hermes Bytecode.
-
-Usage:
-    hbctool (disasm|d) [-y | --force] <HBC_FILE> [<HASM_PATH>]
-    hbctool (asm|a) [<HASM_PATH>] [<HBC_FILE>]
-    hbctool --help
-    hbctool --version
-
-Operation:
-    disasm, d           Disassemble Hermes Bytecode
-    asm, a              Assemble Hermes Bytecode
-
-Args:
-    HBC_FILE            Target HBC file
-    HASM_PATH           Target HASM directory path
-
-Options:
-    -y, --force         Overwrite an existing HASM output directory without prompting
-    --version           Show hbctool version
-    --help              Show hbctool help manual
-
-Examples:
-    hbctool disasm index.android.bundle test_hasm
-    hbctool asm test_hasm index.android.bundle
-    hbctool d index.android.bundle test_hasm
-    hbctool a test_hasm index.android.bundle
-"""
+"""A command-line interface for disassembling and assembling Hermes Bytecode."""
 from hbctool import metadata, hbc, hasm
+import argparse
+import logging
 import os
 import sys
 
 DEFAULT_HASM_PATH = "hasm"
 DEFAULT_HBC_FILE = "index.android.bundle"
 
+log = logging.getLogger("hbctool")
+
+
 def _is_unsafe_output_path(path):
     abs_path = os.path.abspath(path)
     return abs_path in ("/", os.path.abspath(os.path.expanduser("~")))
+
 
 def _confirm_overwrite(path, force=False):
     if not os.path.exists(path):
@@ -60,56 +38,175 @@ def _confirm_overwrite(path, force=False):
 
     return True
 
+
 def disasm(hbcfile, hasmpath, force=False):
     if not os.path.isfile(hbcfile):
         raise FileNotFoundError(f"HBC file not found: {hbcfile}")
 
-    print(f"[*] Disassemble '{hbcfile}' to '{hasmpath}' path")
+    log.info("Disassemble '%s' to '%s' path", hbcfile, hasmpath)
     with open(hbcfile, "rb") as f:
         hbco = hbc.load(f)
 
     header = hbco.getHeader()
     sourceHash = bytes(header["sourceHash"]).hex()
     version = header["version"]
-    print(f"[*] Hermes Bytecode [ Source Hash: {sourceHash}, HBC Version: {version} ]")
+    log.info("Hermes Bytecode [ Source Hash: %s, HBC Version: %s ]", sourceHash, version)
 
     overwrite = _confirm_overwrite(hasmpath, force=force)
     hasm.dump(hbco, hasmpath, force=overwrite)
-    print(f"[*] Done")
+    log.info("Done")
+
 
 def asm(hasmpath, hbcfile):
-    print(f"[*] Assemble '{hasmpath}' to '{hbcfile}' path")
+    log.info("Assemble '%s' to '%s' path", hasmpath, hbcfile)
     hbco = hasm.load(hasmpath)
 
     header = hbco.getHeader()
     sourceHash = bytes(header["sourceHash"]).hex()
     version = header["version"]
-    print(f"[*] Hermes Bytecode [ Source Hash: {sourceHash}, HBC Version: {version} ]")
+    log.info("Hermes Bytecode [ Source Hash: %s, HBC Version: %s ]", sourceHash, version)
 
     with open(hbcfile, "wb") as f:
         hbc.dump(hbco, f)
-    print(f"[*] Done")
+    log.info("Done")
 
-def main():
-    from docopt import docopt
-    args = docopt(__doc__, version=f"{metadata.project} {metadata.version}")
+
+def info(hbcfile):
+    if not os.path.isfile(hbcfile):
+        raise FileNotFoundError(f"HBC file not found: {hbcfile}")
+
+    with open(hbcfile, "rb") as f:
+        hbco = hbc.load(f)
+
+    header = hbco.getHeader()
+    sourceHash = bytes(header["sourceHash"]).hex()
+    version = header["version"]
+    function_count = hbco.getFunctionCount()
+    string_count = hbco.getStringCount()
+
+    print(f"file:           {hbcfile}")
+    print(f"size:           {os.path.getsize(hbcfile)} bytes")
+    print(f"version:        {version}")
+    print(f"source_hash:    {sourceHash}")
+    print(f"function_count: {function_count}")
+    print(f"string_count:   {string_count}")
+
+
+def _build_parser():
+    parser = argparse.ArgumentParser(
+        prog="hbctool",
+        description="A command-line interface for disassembling and assembling "
+        "the Hermes Bytecode.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Examples:\n"
+            "    hbctool disasm index.android.bundle test_hasm\n"
+            "    hbctool asm test_hasm index.android.bundle\n"
+            "    hbctool d index.android.bundle test_hasm\n"
+            "    hbctool a test_hasm index.android.bundle\n"
+            "    hbctool info index.android.bundle\n"
+        ),
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"{metadata.project} {metadata.version}",
+    )
+
+    verbosity = parser.add_mutually_exclusive_group()
+    verbosity.add_argument(
+        "-q", "--quiet", action="store_true", help="Only print warnings and errors."
+    )
+    verbosity.add_argument(
+        "-v", "--verbose", action="store_true", help="Print debug-level logging."
+    )
+
+    sub = parser.add_subparsers(dest="command", metavar="COMMAND")
+    sub.required = True
+
+    p_disasm = sub.add_parser(
+        "disasm",
+        aliases=["d"],
+        help="Disassemble a Hermes bytecode bundle into a HASM directory.",
+        description="Disassemble a Hermes bytecode bundle into a HASM directory.",
+    )
+    p_disasm.add_argument(
+        "-y", "--force",
+        action="store_true",
+        help="Overwrite an existing HASM output directory without prompting.",
+    )
+    p_disasm.add_argument("hbc_file", metavar="HBC_FILE", help="Target HBC file")
+    p_disasm.add_argument(
+        "hasm_path",
+        metavar="HASM_PATH",
+        nargs="?",
+        default=DEFAULT_HASM_PATH,
+        help=f"Target HASM directory path (default: {DEFAULT_HASM_PATH})",
+    )
+
+    p_asm = sub.add_parser(
+        "asm",
+        aliases=["a"],
+        help="Assemble a HASM directory back into a Hermes bytecode bundle.",
+        description="Assemble a HASM directory back into a Hermes bytecode bundle.",
+    )
+    p_asm.add_argument(
+        "hasm_path",
+        metavar="HASM_PATH",
+        nargs="?",
+        default=DEFAULT_HASM_PATH,
+        help=f"Source HASM directory path (default: {DEFAULT_HASM_PATH})",
+    )
+    p_asm.add_argument(
+        "hbc_file",
+        metavar="HBC_FILE",
+        nargs="?",
+        default=DEFAULT_HBC_FILE,
+        help=f"Target HBC file (default: {DEFAULT_HBC_FILE})",
+    )
+
+    p_info = sub.add_parser(
+        "info",
+        help="Print metadata for a Hermes bytecode bundle without disassembling it.",
+        description="Print metadata for a Hermes bytecode bundle without disassembling it.",
+    )
+    p_info.add_argument("hbc_file", metavar="HBC_FILE", help="Target HBC file")
+
+    return parser
+
+
+def _configure_logging(args):
+    level = logging.INFO
+    if args.quiet:
+        level = logging.WARNING
+    elif args.verbose:
+        level = logging.DEBUG
+    logging.basicConfig(level=level, format="[*] %(message)s", stream=sys.stderr)
+
+
+def main(argv=None):
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    _configure_logging(args)
+
     try:
-        if args['disasm'] or args['d']:
-            disasm(
-                args['<HBC_FILE>'],
-                args['<HASM_PATH>'] or DEFAULT_HASM_PATH,
-                force=bool(args.get('--force') or args.get('-y')),
-            )
-        elif args['asm'] or args['a']:
-            asm(args['<HASM_PATH>'] or DEFAULT_HASM_PATH, args['<HBC_FILE>'] or DEFAULT_HBC_FILE)
+        if args.command in ("disasm", "d"):
+            disasm(args.hbc_file, args.hasm_path, force=args.force)
+        elif args.command in ("asm", "a"):
+            asm(args.hasm_path, args.hbc_file)
+        elif args.command == "info":
+            info(args.hbc_file)
+        else:
+            parser.error(f"unknown command: {args.command}")
     except (FileNotFoundError, FileExistsError, hasm.HASMError, ValueError) as exc:
-        print(f"[!] {exc}", file=sys.stderr)
+        log.error("%s", exc)
         raise SystemExit(1)
-    
+
 
 def entry_point():
     """Zero-argument entry point for use with setuptools/distribute."""
     main()
+
 
 if __name__ == "__main__":
     main()
