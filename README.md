@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Baba01hacker666/HBC-Tool/main/image/hbctool-logo.svg" alt="hbctool logo" width="900">
+  <img src="https://raw.githubusercontent.com/Doraemoncyberteam666/HBC-Tool/main/image/hbctool-logo.svg" alt="hbctool logo" width="900">
 </p>
 
 <p align="center">
@@ -49,7 +49,7 @@ python3 -m pip install -e .
 ```
 ## PIPX INSTALL 
 ```bash
-pipx install git+https://github.com/Baba01hacker666/HBC-Tool.git
+pipx install git+https://github.com/Doraemoncyberteam666/HBC-Tool.git
 ```
 ### Build the optional native extension
 

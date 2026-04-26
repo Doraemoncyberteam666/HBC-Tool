@@ -24,7 +24,8 @@ class HBC85:
         export(self.getObj(), f)
 
     def getObj(self):
-        assert self.obj, "Obj is not set."
+        if not (self.obj):
+            raise RuntimeError("Obj is not set.")
         return self.obj
 
     def setObj(self, obj):
@@ -40,7 +41,8 @@ class HBC85:
         return self.getObj()["header"]["functionCount"]
 
     def getFunction(self, fid, disasm=True):
-        assert fid >= 0 and fid < self.getFunctionCount(), "Invalid function ID"
+        if not (fid >= 0 and fid < self.getFunctionCount()):
+            raise IndexError("Invalid function ID")
 
         functionHeader = self.getObj()["functionHeaders"][fid]
         offset = functionHeader["offset"]
@@ -63,7 +65,8 @@ class HBC85:
         return functionNameStr, paramCount, registerCount, symbolCount, insts, functionHeader
     
     def setFunction(self, fid, func, disasm=True, offset_shift=0, string_id_cache=None):
-        assert fid >= 0 and fid < self.getFunctionCount(), "Invalid function ID"
+        if not (fid >= 0 and fid < self.getFunctionCount()):
+            raise IndexError("Invalid function ID")
 
         functionName, paramCount, registerCount, symbolCount, insts, _ = func
 
@@ -192,7 +195,8 @@ class HBC85:
         return self.getObj()["header"]["stringCount"]
 
     def getString(self, sid):
-        assert sid >= 0 and sid < self.getStringCount(), "Invalid string ID"
+        if not (sid >= 0 and sid < self.getStringCount()):
+            raise IndexError("Invalid string ID")
 
         stringTableEntry = self.getObj()["stringTableEntries"][sid]
         stringStorage = self.getObj()["stringStorage"]
@@ -214,7 +218,8 @@ class HBC85:
         return s.hex() if isUTF16 else s.decode("utf-8"), (isUTF16, offset, length)
     
     def setString(self, sid, val):
-        assert sid >= 0 and sid < self.getStringCount(), "Invalid string ID"
+        if not (sid >= 0 and sid < self.getStringCount()):
+            raise IndexError("Invalid string ID")
 
         stringTableEntry = self.getObj()["stringTableEntries"][sid]
         stringStorage = self.getObj()["stringStorage"]
@@ -300,7 +305,8 @@ class HBC85:
         return self.getObj()["header"]["arrayBufferSize"]
 
     def getArray(self, aid):
-        assert aid >= 0 and aid < self.getArrayBufferSize(), "Invalid Array ID"
+        if not (aid >= 0 and aid < self.getArrayBufferSize()):
+            raise IndexError("Invalid Array ID")
         tag = self._checkBufferTag(self.getObj()["arrayBuffer"], aid)
         ind = 2 if tag[0] > 0x0f else 1
         arr = []
@@ -315,7 +321,8 @@ class HBC85:
         return self.getObj()["header"]["objKeyBufferSize"]
 
     def getObjKey(self, kid):
-        assert kid >= 0 and kid < self.getObjKeyBufferSize(), "Invalid ObjKey ID"
+        if not (kid >= 0 and kid < self.getObjKeyBufferSize()):
+            raise IndexError("Invalid ObjKey ID")
         tag = self._checkBufferTag(self.getObj()["objKeyBuffer"], kid)
         ind = 2 if tag[0] > 0x0f else 1
         keys = []
@@ -330,7 +337,8 @@ class HBC85:
         return self.getObj()["header"]["objValueBufferSize"]
 
     def getObjValue(self, vid):
-        assert vid >= 0 and vid < self.getObjValueBufferSize(), "Invalid ObjValue ID"
+        if not (vid >= 0 and vid < self.getObjValueBufferSize()):
+            raise IndexError("Invalid ObjValue ID")
         tag = self._checkBufferTag(self.getObj()["objValueBuffer"], vid)
         ind = 2 if tag[0] > 0x0f else 1
         keys = []

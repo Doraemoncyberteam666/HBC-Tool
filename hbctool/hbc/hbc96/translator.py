@@ -67,9 +67,11 @@ def assemble(insts):
     for opcode, operands in insts:
         op = opcode_mapper_inv[opcode]
         bc.append(op)
-        assert len(opcode_operand[opcode]) == len(operands), f"Malicious instruction: {op}, {operands}"
+        if not (len(opcode_operand[opcode]) == len(operands)):
+            raise ValueError(f"malformed instruction: {op}, {operands}")
         for oper_t, _, val in operands:
-            assert oper_t in operand_type, f"Malicious operand type: {oper_t}"
+            if not (oper_t in operand_type):
+                raise ValueError(f"unknown operand type: {oper_t}")
             _, _, conv_from = operand_type[oper_t]
             bc += conv_from(val)
 
